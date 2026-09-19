@@ -1,5 +1,8 @@
 package com.example.xingyue;
 
+import java.util.HashSet;
+import java.util.Set;
+import java.util.UUID;
 import java.util.function.Predicate;
 
 import net.minecraft.core.Direction;
@@ -25,15 +28,24 @@ import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.item.ToolMaterial;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.tick.PlayerTickEvent;
 
 /**
  * 星月：原创武器（剑）。
  * 左键攻击同原版剑；长按右键蓄力（弓姿势），到 {@link #FULL_CHARGE_TICK} 刻自动爆发：
  * 星月粒子1 三重迸发、半径 {@link #BURST_RADIUS} 格内实体受 {@link #BURST_DAMAGE} 点伤害，
  * 以玩家实体为基准被水平击退约 3 格、向上击飞约 3 格（落地结算摔落伤害）；
- * 玩家跃起约 4.9 格（可跨越 4 格方块），落地免摔（复用原版风爆的 impulse 免摔机制）。
+ * 玩家跃起约 4.9 格（可跨越 4 格高的方块）并沿视线水平方向前冲约 4 格，落地免摔
+ * （复用原版风爆的 impulse 免摔机制）。
  * 爆发后进入 {@link #COOLDOWN_TICKS} 刻冷却（物品栏扫表动画）并损耗 1 点耐久（与普攻相同）。
  * 与盾牌共持时无法蓄力，盾牌可正常格挡。
+ *
+ * <p>与飞翔模组（可选安装）的联动：垂直发射采用两段式——爆发刻先把玩家垂直速度归零，
+ * 下一刻再施加 {@link #JUMP_POWER}。这保证"上一刻垂直速度 ≤ 阈值 → 本刻 ≥ 阈值"的
+ * 跃起反转采样必然发生（否则蓄力释放瞬间玩家正在上升时，上一刻速度高于阈值，
+ * 飞翔附魔检测不到跃起、无法发动突进），因此蓄力跃起后玩家必定可直接发动一次飞翔突进。
+ * 本模组不引用飞翔模组的任何类，零编译依赖。</p>
  */
 public class XingyueItem extends Item {
     /** 星月材质：1680 耐久，攻击伤害加成 3.0（+3.0 基线 = 总伤害 7），下界合金级采矿与修复。 */
@@ -51,8 +63,13 @@ public class XingyueItem extends Item {
     public static final double BURST_KNOCKBACK = 0.4;
     /** 被击飞实体的向上初速：约 1 格腾空。 */
     public static final double BURST_LAUNCH = 0.38;
-    /** 玩家跃起初速：按原版重力/阻尼约 4.9 格高，可跨越 4 格方块。 */
+    /** 玩家跃起初速：按原版重力/阻尼约 4.9 格高，可跨越 4 格高的方块。 */
     public static final double JUMP_POWER = 0.9;
+    /** 玩家跃起的水平前冲初速：沿视线水平方向，空中阻力 0.91/刻下约前冲 4 格。 */
+    public static final double JUMP_FORWARD = 0.42;
+
+    /** 待发射标记：蓄力爆发的垂直发射推迟一刻执行（见类注释的两段式说明）。 */
+    private static final Set<UUID> PENDING_LAUNCH = new HashSet<>();
 
     public XingyueItem(Properties properties) {
         super(properties);
@@ -201,9 +218,19 @@ public class XingyueItem extends Item {
     }
 
     // 原版风爆弹跳同款：Y 轴推力 + 记录起跳点，落地结算摔落时以起跳点为基准，故不受摔落伤害。
-    // 跃起瞬间播放三叉戟落地（音量1）与 spyglass 展开（音量4）音效
+    // 水平前冲立即生效；垂直发射走两段式（先归零、下一刻施加 JUMP_POWER），
+    // 保证飞翔附魔的跃起反转检测必然识别本次跃起（见类注释）。跃起瞬间播放三叉戟落地（音量1）
+    // 与 spyglass 展开（音量4）音效
     private static void launchPlayer(ServerLevel level, Player player) {
-        player.setDeltaMovement(player.getDeltaMovement().with(Direction.Axis.Y, JUMP_POWER));
+        Vec3 look = player.getLookAngle();
+        Vec3 horizontal = new Vec3(look.x, 0.0, look.z);
+        horizontal = horizontal.lengthSqr() > 1.0E-4
+            ? horizontal.normalize()
+            : Vec3.directionFromRotation(0.0F, player.getYRot());
+        // 第一段：水平前冲（≈4 格）+ 垂直速度归零（腾出跃起反转采样的"低速上一刻"）
+        player.setDeltaMovement(player.getDeltaMovement().add(horizontal.scale(JUMP_FORWARD))
+            .with(Direction.Axis.Y, 0.0));
+        PENDING_LAUNCH.add(player.getUUID());
         player.resetFallDistance();
         player.setIgnoreFallDamageFromCurrentImpulse(true, player.position());
         if (player instanceof ServerPlayer serverPlayer) {
@@ -213,5 +240,21 @@ public class XingyueItem extends Item {
             SoundEvents.TRIDENT_HIT_GROUND, SoundSource.PLAYERS, 1.0F, 1.0F);
         level.playSound(null, player.getX(), player.getY(), player.getZ(),
             SoundEvents.SPYGLASS_USE, SoundSource.PLAYERS, 4.0F, 1.0F);
+    }
+
+    // 游戏总线：待发射玩家的第二段——玩家刻开始时施加垂直起跳力（此刻的位移采样即呈现
+    // "上一刻 ≤ 阈值 → 本刻 ≥ 阈值"的反转，飞翔附魔由此开放突进窗口）
+    public static void onPlayerTickPre(PlayerTickEvent.Pre event) {
+        if (event.getEntity() instanceof ServerPlayer player
+            && player.level() instanceof ServerLevel
+            && PENDING_LAUNCH.remove(player.getUUID())) {
+            player.setDeltaMovement(player.getDeltaMovement().with(Direction.Axis.Y, JUMP_POWER));
+            player.connection.send(new ClientboundSetEntityMotionPacket(player));
+        }
+    }
+
+    // 游戏总线：退出时清理待发射标记
+    public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
+        PENDING_LAUNCH.remove(event.getEntity().getUUID());
     }
 }

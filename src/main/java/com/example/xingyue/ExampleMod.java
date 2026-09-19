@@ -13,6 +13,7 @@ import net.minecraft.world.item.Rarity;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.ModContainer;
+import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
 import net.neoforged.neoforge.registries.DeferredHolder;
 import net.neoforged.neoforge.registries.DeferredItem;
@@ -49,6 +50,10 @@ public class ExampleMod {
         ITEMS.register(modEventBus);
         // Register the Deferred Register to the mod event bus so particle types get registered
         PARTICLE_TYPES.register(modEventBus);
+
+        // 游戏总线：蓄力爆发的两段式发射（跃起反转采样，保障飞翔联动）与退出清理
+        NeoForge.EVENT_BUS.addListener(XingyueItem::onPlayerTickPre);
+        NeoForge.EVENT_BUS.addListener(XingyueItem::onPlayerLoggedOut);
 
         // Register the item to the combat creative tab
         modEventBus.addListener(this::addCreative);
