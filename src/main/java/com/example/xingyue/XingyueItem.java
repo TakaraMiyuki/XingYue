@@ -1,8 +1,6 @@
 package com.example.xingyue;
 
-import java.util.HashSet;
-import java.util.Set;
-import java.util.UUID;
+import java.lang.reflect.Method;
 import java.util.function.Predicate;
 
 import net.minecraft.core.Direction;
@@ -28,8 +26,6 @@ import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.item.ToolMaterial;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
-import net.neoforged.neoforge.event.entity.player.PlayerEvent;
-import net.neoforged.neoforge.event.tick.PlayerTickEvent;
 
 /**
  * 星月：原创武器（剑）。
@@ -41,11 +37,10 @@ import net.neoforged.neoforge.event.tick.PlayerTickEvent;
  * 爆发后进入 {@link #COOLDOWN_TICKS} 刻冷却（物品栏扫表动画）并损耗 1 点耐久（与普攻相同）。
  * 与盾牌共持时无法蓄力，盾牌可正常格挡。
  *
- * <p>与飞翔模组（可选安装）的联动：垂直发射采用两段式——爆发刻先把玩家垂直速度归零，
- * 下一刻再施加 {@link #JUMP_POWER}。这保证"上一刻垂直速度 ≤ 阈值 → 本刻 ≥ 阈值"的
- * 跃起反转采样必然发生（否则蓄力释放瞬间玩家正在上升时，上一刻速度高于阈值，
- * 飞翔附魔检测不到跃起、无法发动突进），因此蓄力跃起后玩家必定可直接发动一次飞翔突进。
- * 本模组不引用飞翔模组的任何类，零编译依赖。</p>
+ * <p>与飞翔模组（可选安装）的联动：蓄力发射时通过软依赖（反射查找飞翔模组的
+ * {@code FlyingEnchantMod#notifyLaunch}）<b>显式宣告本次跃起</b>，由飞翔直接开放突进窗口
+ * （持续到落地，覆盖整个跃起过程）——不再依赖飞翔侧的速度反转采样检测（该检测对
+ * 蓄力释放等发射时机不可靠）。未安装飞翔时静默跳过，零编译依赖保持。</p>
  */
 public class XingyueItem extends Item {
     /** 星月材质：1680 耐久，攻击伤害加成 3.0（+3.0 基线 = 总伤害 7），下界合金级采矿与修复。 */
@@ -68,8 +63,10 @@ public class XingyueItem extends Item {
     /** 玩家跃起的水平前冲初速：沿视线水平方向，空中阻力 0.91/刻下约前冲 4 格。 */
     public static final double JUMP_FORWARD = 0.42;
 
-    /** 待发射标记：蓄力爆发的垂直发射推迟一刻执行（见类注释的两段式说明）。 */
-    private static final Set<UUID> PENDING_LAUNCH = new HashSet<>();
+    /** 飞翔模组的 notifyLaunch 方法（软依赖，首次发射时解析；未安装飞翔时探测后保持 null）。 */
+    private static Method flyingNotifyLaunch;
+    /** 是否已探测过飞翔模组的 notifyLaunch（含"未安装"结论）。 */
+    private static boolean flyingNotifyProbed;
 
     public XingyueItem(Properties properties) {
         super(properties);
@@ -218,19 +215,17 @@ public class XingyueItem extends Item {
     }
 
     // 原版风爆弹跳同款：Y 轴推力 + 记录起跳点，落地结算摔落时以起跳点为基准，故不受摔落伤害。
-    // 水平前冲立即生效；垂直发射走两段式（先归零、下一刻施加 JUMP_POWER），
-    // 保证飞翔附魔的跃起反转检测必然识别本次跃起（见类注释）。跃起瞬间播放三叉戟落地（音量1）
-    // 与 spyglass 展开（音量4）音效
+    // 水平前冲沿视线方向（≈4 格）；发射后软依赖通知飞翔模组显式开放突进窗口（见类注释）。
+    // 跃起瞬间播放三叉戟落地（音量1）与 spyglass 展开（音量4）音效
     private static void launchPlayer(ServerLevel level, Player player) {
         Vec3 look = player.getLookAngle();
         Vec3 horizontal = new Vec3(look.x, 0.0, look.z);
         horizontal = horizontal.lengthSqr() > 1.0E-4
             ? horizontal.normalize()
             : Vec3.directionFromRotation(0.0F, player.getYRot());
-        // 第一段：水平前冲（≈4 格）+ 垂直速度归零（腾出跃起反转采样的"低速上一刻"）
-        player.setDeltaMovement(player.getDeltaMovement().add(horizontal.scale(JUMP_FORWARD))
-            .with(Direction.Axis.Y, 0.0));
-        PENDING_LAUNCH.add(player.getUUID());
+        player.setDeltaMovement(player.getDeltaMovement()
+            .add(horizontal.scale(JUMP_FORWARD)).with(Direction.Axis.Y, JUMP_POWER));
+        notifyFlyingLaunch(player);
         player.resetFallDistance();
         player.setIgnoreFallDamageFromCurrentImpulse(true, player.position());
         if (player instanceof ServerPlayer serverPlayer) {
@@ -242,19 +237,25 @@ public class XingyueItem extends Item {
             SoundEvents.SPYGLASS_USE, SoundSource.PLAYERS, 4.0F, 1.0F);
     }
 
-    // 游戏总线：待发射玩家的第二段——玩家刻开始时施加垂直起跳力（此刻的位移采样即呈现
-    // "上一刻 ≤ 阈值 → 本刻 ≥ 阈值"的反转，飞翔附魔由此开放突进窗口）
-    public static void onPlayerTickPre(PlayerTickEvent.Pre event) {
-        if (event.getEntity() instanceof ServerPlayer player
-            && player.level() instanceof ServerLevel
-            && PENDING_LAUNCH.remove(player.getUUID())) {
-            player.setDeltaMovement(player.getDeltaMovement().with(Direction.Axis.Y, JUMP_POWER));
-            player.connection.send(new ClientboundSetEntityMotionPacket(player));
+    // 软依赖：反射查找飞翔模组的 FlyingEnchantMod#notifyLaunch(Player) 并宣告本次跃起，
+    // 由飞翔直接开放突进窗口（不再依赖速度反转采样检测）。未安装飞翔（ClassNotFound）
+    // 时缓存探测结果、此后直接跳过；解析结果整个生命周期只查一次。
+    private static void notifyFlyingLaunch(Player player) {
+        try {
+            if (!flyingNotifyProbed) {
+                Class<?> api = Class.forName("com.example.flyingenchant.FlyingEnchantMod");
+                flyingNotifyLaunch = api.getMethod("notifyLaunch", Player.class);
+                flyingNotifyLaunch.setAccessible(true);
+            }
+            if (flyingNotifyLaunch != null) {
+                flyingNotifyLaunch.invoke(null, player);
+            }
+        } catch (ClassNotFoundException e) {
+            // 飞翔未安装：无联动，正常跃起
+        } catch (ReflectiveOperationException e) {
+            ExampleMod.LOGGER.warn("Xingyue: failed to notify Flying mod of launch", e);
+        } finally {
+            flyingNotifyProbed = true;
         }
-    }
-
-    // 游戏总线：退出时清理待发射标记
-    public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
-        PENDING_LAUNCH.remove(event.getEntity().getUUID());
     }
 }
