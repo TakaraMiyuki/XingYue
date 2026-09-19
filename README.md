@@ -11,15 +11,15 @@
 
 ## ⚠️ 测试版说明
 
-本模组处于 **0.1.0-beta** 阶段，功能仍在完善：
+本模组处于 **0.1.1-beta** 阶段，功能仍在完善：
 
 - 后续版本可能调整数值、特效与机制
-- 升级 0.1.0-beta 前请备份存档（mod id 由 examplemod 改名为 xingyue，旧测试存档中的星月物品会消失）
+- 升级 0.1.1-beta 前请备份存档（mod id 由 examplemod 改名为 xingyue，旧测试存档中的星月物品会消失）
 - 反馈问题请开 [Issue](https://github.com/TakaraMiyuki/XingYue/issues)
 
 ## 获取
 
-从 [Releases](https://github.com/TakaraMiyuki/XingYue/releases) 下载 `xingyue-0.1.0-beta.jar` 放入 `mods/`。
+从 [Releases](https://github.com/TakaraMiyuki/XingYue/releases) 下载 `xingyue-0.1.1-beta.jar` 放入 `mods/`。
 
 ## 联动模组：飞翔 (Flying)
 
