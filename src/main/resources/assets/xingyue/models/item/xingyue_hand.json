@@ -4,7 +4,6 @@
     "particle": "xingyue:item/xingyue_hand"
   },
   "gui_light": "front",
-  "comment": "手持几何：24x24 贴图按 1 像素=1 单位铺满 24 单位平面（原版为 16 单位），像素密度与原版一致、剑身整体 1.5 倍；剑柄对齐原版剑握把的模型位置 (1,2)。display 为原版 handheld 数值原样拷贝，无缩放覆盖。",
   "display": {
     "thirdperson_righthand": {
       "rotation": [0, -90, 55],
